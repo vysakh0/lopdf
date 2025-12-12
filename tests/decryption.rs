@@ -1530,3 +1530,129 @@ fn test_was_encrypted_method() {
     assert!(loaded_locked.is_encrypted(), "Should still appear encrypted without password");
     assert!(!loaded_locked.was_encrypted(), "encryption_state not set when auth failed");
 }
+
+#[cfg(not(feature = "async"))]
+#[test]
+fn test_protect_multipage_pdf() {
+    use std::io::Write;
+    
+    // Create a multi-page PDF similar to what agentmaker does
+    let mut doc = Document::with_version("1.5");
+    
+    // Create pages
+    let pages_id = doc.new_object_id();
+    let mut page_ids = Vec::new();
+    let mut content_ids = Vec::new();
+    let font_id = doc.new_object_id();
+    
+    for _ in 0..5 {
+        page_ids.push(doc.new_object_id());
+        content_ids.push(doc.new_object_id());
+    }
+    
+    // Catalog
+    let catalog_dict = lopdf::dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id)
+    };
+    let catalog_id = doc.add_object(catalog_dict);
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+    
+    // Pages tree
+    let pages_dict = lopdf::dictionary! {
+        "Type" => "Pages",
+        "Kids" => page_ids.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
+        "Count" => page_ids.len() as i64
+    };
+    doc.objects.insert(pages_id, Object::Dictionary(pages_dict));
+    
+    // Font
+    let font_dict = lopdf::dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica"
+    };
+    doc.objects.insert(font_id, Object::Dictionary(font_dict));
+    
+    // Create pages and content
+    for (i, (page_id, content_id)) in page_ids.iter().zip(content_ids.iter()).enumerate() {
+        let mut resources = lopdf::Dictionary::new();
+        let mut fonts = lopdf::Dictionary::new();
+        fonts.set("F1", Object::Reference(font_id));
+        resources.set("Font", fonts);
+        
+        let page_dict = lopdf::dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => vec![Object::Integer(0), Object::Integer(0), Object::Integer(612), Object::Integer(792)],
+            "Resources" => Object::Dictionary(resources),
+            "Contents" => Object::Reference(*content_id)
+        };
+        doc.objects.insert(*page_id, Object::Dictionary(page_dict));
+        
+        let content = format!("BT /F1 12 Tf 100 700 Td (Page {} Content) Tj ET", i + 1);
+        let content_stream = lopdf::Stream::new(lopdf::dictionary! {}, content.into_bytes());
+        doc.objects.insert(*content_id, Object::Stream(content_stream));
+    }
+    
+    let temp_dir = tempfile::tempdir().unwrap();
+    
+    // Save unencrypted first
+    let unencrypted_path = temp_dir.path().join("multipage_unencrypted.pdf");
+    doc.save(&unencrypted_path).unwrap();
+    let unencrypted_size = std::fs::metadata(&unencrypted_path).unwrap().len();
+    println!("Unencrypted PDF: {} bytes, {} pages", unencrypted_size, doc.get_pages().len());
+    
+    // Now do what agentmaker's protect_pdf does:
+    // 1. Decompress
+    doc.decompress();
+    
+    // 2. Add ID if missing
+    if doc.trailer.get(b"ID").is_err() {
+        let id_bytes = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let id_array = Object::Array(vec![
+            Object::String(id_bytes.clone(), lopdf::StringFormat::Hexadecimal),
+            Object::String(id_bytes, lopdf::StringFormat::Hexadecimal),
+        ]);
+        doc.trailer.set("ID", id_array);
+    }
+    
+    // 3. Create encryption using AES-128 (V4)
+    use std::sync::Arc;
+    use std::collections::BTreeMap;
+    
+    let crypt_filter: Arc<dyn lopdf::encryption::crypt_filters::CryptFilter> =
+        Arc::new(lopdf::encryption::crypt_filters::Aes128CryptFilter);
+    
+    let encryption_version = lopdf::EncryptionVersion::V4 {
+        document: &doc,
+        encrypt_metadata: true,
+        crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), crypt_filter)]),
+        stream_filter: b"StdCF".to_vec(),
+        string_filter: b"StdCF".to_vec(),
+        owner_password: "owner_password",
+        user_password: "user_password",
+        permissions: lopdf::Permissions::all(),
+    };
+    
+    let state = lopdf::EncryptionState::try_from(encryption_version).unwrap();
+    doc.encrypt(&state).unwrap();
+    
+    // 4. Save encrypted
+    let encrypted_path = temp_dir.path().join("multipage_encrypted.pdf");
+    doc.save(&encrypted_path).unwrap();
+    let encrypted_size = std::fs::metadata(&encrypted_path).unwrap().len();
+    println!("Encrypted PDF: {} bytes", encrypted_size);
+    
+    // Verify the encrypted file is not drastically smaller
+    assert!(encrypted_size > unencrypted_size / 2, 
+        "Encrypted file ({} bytes) is too small compared to unencrypted ({} bytes)",
+        encrypted_size, unencrypted_size);
+    
+    // Try to load with password
+    let loaded = Document::load_with_password(&encrypted_path, "user_password").unwrap();
+    let pages = loaded.get_pages();
+    println!("Loaded encrypted PDF: {} pages, {} objects", pages.len(), loaded.objects.len());
+    
+    assert_eq!(pages.len(), 5, "Should have 5 pages after loading encrypted PDF");
+}
