@@ -263,9 +263,29 @@ impl Document {
             .and_then(|id| self.get_dictionary(id))
     }
 
-    /// Return true is PDF document is encrypted
+    /// Return true if PDF document is currently encrypted (has Encrypt entry in trailer).
+    ///
+    /// Note: After successfully loading an encrypted PDF with the correct password,
+    /// this returns `false` because the document has been decrypted. Use `was_encrypted()`
+    /// to check if the document was originally encrypted.
     pub fn is_encrypted(&self) -> bool {
         self.get_encrypted().is_ok()
+    }
+
+    /// Return true if the document was originally encrypted when loaded.
+    ///
+    /// This is useful after loading an encrypted PDF with password - the document
+    /// is decrypted (so `is_encrypted()` returns `false`) but this method returns
+    /// `true` to indicate it was originally encrypted.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let doc = Document::load_with_password("encrypted.pdf", "password")?;
+    /// assert!(!doc.is_encrypted());    // Document is now decrypted
+    /// assert!(doc.was_encrypted());    // But it was originally encrypted
+    /// ```
+    pub fn was_encrypted(&self) -> bool {
+        self.encryption_state.is_some()
     }
 
     /// Authenticate the provided owner password directly as bytes without sanitization

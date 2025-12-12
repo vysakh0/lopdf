@@ -466,7 +466,20 @@ impl Reader<'_> {
                         }
                     }
 
+                    // Store the encryption state for reference (indicates doc was encrypted)
                     self.document.encryption_state = Some(state);
+
+                    // Remove the Encrypt entry from trailer so the document appears decrypted
+                    // This is crucial: after successful decryption, objects are plaintext
+                    // If we kept Encrypt in trailer, re-saving would create a broken PDF
+                    // that claims to be encrypted but has unencrypted content
+                    if let Some(enc_ref) = encrypt_ref {
+                        self.document.objects.remove(&enc_ref);
+                    }
+                    self.document.trailer.remove(b"Encrypt");
+
+                    // Note: We intentionally keep the ID array in trailer as it's used
+                    // for other purposes and doesn't indicate encryption by itself
                 }
                 Err(e) => {
                     warn!("Failed to setup encryption state: {:?}", e);
